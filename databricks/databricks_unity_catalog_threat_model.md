@@ -141,22 +141,78 @@ This exercise has laid the groundwork for a more comprehensive understanding and
 
 ## Appendix A: Threat model considerations for serverless compute
 
-This appendix analyzes the changes to the threat model when considering the use of Databricks Serverless compute as an alternative to the Classic (tenant-managed VPC) compute model described in the main document. The primary architectural shift is that compute resources no longer run in the tenant's AWS account but in a secure, Databricks-managed environment. This alters the trust boundaries and shared responsibility model.
+This appendix analyzes the changes to the threat model when considering the use of Databricks Serverless compute as an alternative to the Classic (client-managed VPC) compute model.
+
+As illustrated in the serverless Data Flow Diagram, the primary architectural shift is that compute resources (`databricksComputeServerless`) are moved from the `ClientAwsAccount` to a new `DatabricksServerlessPlane`. This alters the trust boundaries and shared responsibility model, which in turn mitigates some existing threats and introduces new ones.
+
+### Serverless data flow diagram
+
+```mermaid
+graph TD
+    subgraph UserEnvironment["User Environment"]
+        humanUser["Human User"]
+    end
+
+    subgraph DatabricksControlPlane["Databricks Control Plane"]
+        direction LR
+        databricksWebApp["Databricks Web App"]
+        databricksUnityCatalog["Databricks Unity Catalog"]
+        auditLogService["Audit Log Service"]
+    end
+
+    subgraph DatabricksServerlessPlane["Databricks Serverless Plane"]
+        direction LR
+        databricksComputeServerless["Databricks Compute Serverless"]
+    end
+    
+    subgraph ClientAwsAccount["Client AWS Account"]
+        direction LR
+        awsS3ExternalStorage["AWS S3 External Storage"]
+        awsIAM["AWS IAM <br> (Client-defined Roles, Policies, STS)"]
+        secureNetworkConnectivity["Secure Network Connectivity <br> (e.g., PrivateLink Endpoint)"]
+    end
+
+    %% Data Flows
+    humanUser -- "1: SQL Query / Command" --> databricksWebApp
+    databricksWebApp -- "2: Processed Query / Job Details" --> databricksComputeServerless
+    databricksComputeServerless -- "3: Metadata & Permission <br> Request (for query)" --> databricksUnityCatalog
+    
+    %% Unity Catalog assumes an IAM role (defined in Client's AWS IAM) to get temporary credentials
+    databricksUnityCatalog -- "4a: Request to Assume <br> Client-defined IAM Role" --> awsIAM
+    awsIAM -- "4b: Temporary AWS Credentials <br> (for Assumed Role)" --> databricksUnityCatalog
+    
+    %% Unity Catalog uses the assumed role's credentials to generate specific, short-lived S3 credentials
+    databricksUnityCatalog -- "5: Short-lived S3 Token / <br> Signed URL & Data Permissions" --> databricksComputeServerless
+    
+    %% Serverless Compute uses the S3 token/URL to access data in S3 via the secure network connection
+    databricksComputeServerless -- "6: Data Access Request <br> (with S3 Token/URL)" --> secureNetworkConnectivity
+    secureNetworkConnectivity -- "7: Data Payload (Query Results / Data to be Written)" --> awsS3ExternalStorage
+    awsS3ExternalStorage -- "8: Returns Data Payload" --> secureNetworkConnectivity
+    secureNetworkConnectivity -- "9: Returns Data Payload" --> databricksComputeServerless
+    
+    %% Results are returned to the user
+    databricksComputeServerless -- "10: Query Results / Execution Status" --> databricksWebApp
+    databricksWebApp -- "11: Displayed Results / Status" --> humanUser
+
+    %% Audit Logging
+    databricksUnityCatalog -- "12: Audit Log Data <br> (e.g., Grant changes, Access decisions)" --> auditLogService
+    databricksComputeServerless -- "13: Audit Log Data <br> (e.g., Query execution, Data access)" --> auditLogService
+```
 
 ### Mitigated or modified threats
 
 The adoption of serverless compute directly mitigates or modifies the following threats identified in this threat model:
 
-* **T004 (Overly permissive Compute Instance Profile):** This threat is considered **MITIGATED**. Because compute resources no longer run in the tenant's AWS account, the tenant is no longer responsible for creating or managing IAM instance profiles for them. This eliminates the risk of misconfiguring these specific permissions.
-* **T008 (Denial of Service on compute):** This threat is **PARTIALLY MITIGATED**. The nature of the risk shifts from tenant-managed infrastructure availability to service-level availability and cost control. While a malicious query can still consume allocated resources and impact costs, the underlying multi-tenant infrastructure's stability and isolation become Databricks' responsibility to manage.
+* **T004 (Overly permissive Compute Instance Profile):** This threat is considered **MITIGATED**. Because compute resources now reside in the `DatabricksServerlessPlane`, the client is no longer responsible for creating or managing IAM instance profiles in their `ClientAwsAccount`. This eliminates the risk of misconfiguring these specific permissions.
+* **T008 (Denial of Service on compute):** This threat is **PARTIALLY MITIGATED**. The nature of the risk shifts from client-managed infrastructure availability to service-level availability and cost control. While a malicious query can still consume allocated resources, the underlying multi-tenant infrastructure's stability and isolation within the `DatabricksServerlessPlane` become Databricks' responsibility to manage.
 
 ### New or introduced threats
 
 The shift to a serverless architecture introduces new threat vectors to consider:
 
-1.  **Threat of Insecure Network Connectivity Configuration:** The network connection configured to allow the Databricks serverless environment to access data sources within the tenant's AWS account becomes a critical security boundary. A misconfiguration of this connectivity (e.g., overly permissive private endpoint policies) could expose internal resources.
-2.  **Threat of Data Exfiltration from the Serverless Environment:** With the classic model, data egress is controlled via tenant-managed VPC networking. In the serverless model, the tenant relies on Databricks-provided network policies (e.g., a serverless firewall) to control outbound traffic. Misconfiguration of these policies could create a data exfiltration path.
-3.  **Threat of Compromise in the Databricks Multi-Tenant Environment:** The tenant now implicitly trusts Databricks to secure the multi-tenant compute plane. A vulnerability in the serverless infrastructure could potentially lead to a cross-tenant compromise, impacting data confidentiality or integrity. This risk is primarily mitigated by Databricks' internal security posture, which should be evaluated via their security and compliance documentation.
+1.  **Threat of Insecure Network Connectivity Configuration:** The `SecureNetworkConnectivity` component (e.g., an AWS PrivateLink Endpoint) within the `ClientAwsAccount` becomes a critical security boundary. Data flows (6, 7, 8, 9) now pass through this component. A misconfiguration of this connectivity could expose internal resources beyond `awsS3ExternalStorage` to unauthorized access from the `DatabricksServerlessPlane`.
+2.  **Threat of Data Exfiltration from the Serverless Environment:** With the classic model, data egress is controlled via client-managed VPC networking. In the serverless model, the client relies on Databricks-provided network policies to control outbound traffic from the `DatabricksServerlessPlane`. Misconfiguration of these policies could create a data exfiltration path to the public internet, bypassing the client's own network controls.
+3.  **Threat of Compromise in the Databricks Multi-Tenant Environment:** The client now implicitly trusts Databricks to secure the multi-tenant `DatabricksServerlessPlane`. A vulnerability in the serverless infrastructure could potentially lead to a cross-tenant compromise, impacting data confidentiality or integrity. This risk is primarily mitigated by Databricks' internal security posture.
 
 ### Summary of changes
 
@@ -164,10 +220,9 @@ The following table summarizes the impact of switching from Classic to Serverles
 
 |Threat ID|Threat Description|Impact of Switching to Serverless Compute|
 |:---|:---|:---|
-|T004|Overly permissive Compute Instance Profile|**Mitigated.** The tenant no longer manages instance profiles for compute.|
+|T004|Overly permissive Compute Instance Profile|**Mitigated.** The client no longer manages instance profiles for compute.|
 |T008|Denial of Service on compute|**Partially Mitigated/Modified.** The threat shifts from infrastructure availability (now Databricks' responsibility) to service availability and cost control.|
-|*New*|Insecure Network Connectivity Configuration|**New Threat.** A new attack surface is created at the network boundary between the serverless environment and the tenant's AWS account.|
-|*New*|Data Exfiltration from the Serverless Environment|**New Threat.** The method for controlling data egress changes from tenant-managed VPC controls to Databricks-managed serverless network policies.|
-|*New*|Compromise in the Databricks Multi-Tenant Environment|**New Threat.** The tenant now relies on Databricks' security to protect the multi-tenant compute plane, introducing a vendor trust risk.|
-|T001, T002, T003, T005, T006, T007|Other existing threats|**Unchanged.** These threats relate to tenant-managed resources (S3, IAM roles, user endpoints), code-level risks (packages), or data flows that are conceptually the same in both models.|
-
+|*New*|Insecure Network Connectivity Configuration|**New Threat.** A new attack surface is created at the `SecureNetworkConnectivity` component within the `ClientAwsAccount`.|
+|*New*|Data Exfiltration from the Serverless Environment|**New Threat.** The method for controlling data egress changes from client-managed VPC controls to Databricks-managed serverless network policies.|
+|*New*|Compromise in the Databricks Multi-Tenant Environment|**New Threat.** The client now relies on Databricks' security to protect the multi-tenant `DatabricksServerlessPlane`.|
+|T001, T002, T003, T005, T006, T007|Other existing threats|**Unchanged.** These threats relate to client-managed resources (S3, IAM roles, user endpoints), code-level risks (packages), or data flows that are conceptually the same in both models.|
