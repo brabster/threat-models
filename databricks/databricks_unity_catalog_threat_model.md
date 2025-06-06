@@ -92,14 +92,6 @@ The most valuable assets within this system are:
 
 We will use the STRIDE framework as a guide to identify threats. For each threat, we will assess its Likelihood and Impact to determine an overall Risk level.
 
-## Section 3: Identified Threats and Mitigations
-
-We will use the STRIDE framework as a guide to identify threats. For each threat, we will assess its Likelihood and Impact to determine an overall Risk level.
-
-## Section 3: Identified Threats and Mitigations
-
-We will use the STRIDE framework as a guide to identify threats. For each threat, we will assess its Likelihood and Impact to determine an overall Risk level.
-
 |Threat ID|Threat Description|Affected Asset(s) or Flow(s)|STRIDE Category|Potential Impact|Assessed Likelihood|Assessed Risk|Agreed Mitigations & Controls|Status of Mitigation|
 |:---|:---|:---|:---|:---|:---|:---|:---|:---|
 |T001|An attacker gains unauthorized read access to sensitive PII/GDPR data stored in `awsS3ExternalStorage` by exploiting misconfigured S3 bucket policies or ACLs, potentially bypassing some Unity Catalog intended controls.|Data in `awsS3ExternalStorage` (External Tables, raw source data including PII/GDPR)|Information Disclosure|TBC|TBC|TBC|**Potential Mitigations to Consider:**<br>- Peer review of changes.<br>- Policy-as-Code (PaC).<br>- Automated Configuration Scanning & Monitoring.<br>- Strict Enforcement of S3 Block Public Access (BPA).<br>- Adherence to the Principle of Least Privilege.<br>- Preventive Guardrails with AWS Service Control Policies (SCPs).<br>- Regular Dedicated Security Audits.|*To be determined per implementation*|
